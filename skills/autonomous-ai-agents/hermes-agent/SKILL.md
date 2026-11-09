@@ -212,5 +212,20 @@ terminal(command="tmux new-session -d -s resumed 'hermes --resume 20260225_14305
 - **Profile-safe paths** — `get_hermes_home()` in code, `$HERMES_HOME` when resolving paths in a session.
 - **Never hand-edit `config.yaml` for the user** — use `hermes config set KEY VAL`; a stray indent can corrupt the file and break the live gateway.
 
-<!-- Merged in from the shared skills repo. Review placement. -->
+## Keeping the skills directory in the shared repo
+
+- **The skills directory is a checkout, not a copy.** `~/.hermes/skills` is a
+  symlink into `~/.hermes/skills-repo/skills`, a clone of the shared skills
+  repo. A skill created or patched here is already a working-tree change: commit
+  and push it from `~/.hermes/skills-repo`, or it exists on this machine only.
+- **Never sync two skill sets with a directory copy.** Both sides drift, and a
+  copy in either direction deletes whatever the source lacks. A deleted rule
+  does not announce itself — it silently stops firing. Union the two sides:
+  add what is missing, keep what is local, and merge conflicting files by line.
+- **Normalise line endings before counting conflicts.** A set edited on both
+  Windows and Linux shows every shared file as conflicting; stripping carriage
+  returns before comparing cut 43 apparent conflicts to 9 real ones.
+- **Back up before any merge.** The checkout has history, but an unversioned
+  skills directory being merged into does not, so copy it aside first.
+
 - **Separate Desktop chat health from messaging-gateway health** — when the Desktop shows a messaging-stopped warning, check `hermes gateway status` and the gateway logs before diagnosing the model or Desktop backend; Desktop inference may be healthy while the optional messaging gateway is stopped.
