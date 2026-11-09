@@ -21,58 +21,66 @@ quality gates, an independent reviewer subagent, and an auto-fix loop.
 ## When to Use
 
 - After implementing a feature or bug fix, before `git commit` or `git push`
-- When user asks what local changes mean, whether they are ready to push, or says "commit", "push", "ship", "done", "verify", or "review before merge"
+- When user says "commit", "push", "ship", "done", "verify", or "review before merge"
 - After completing a task with 2+ file edits in a git repo
 - After each task in subagent-driven-development (the two-stage review)
 
-**Skip automated verification for:** documentation-only changes, pure config tweaks, or when user explicitly requests it; still inspect the requested diff.
+**Skip for:** documentation-only changes, pure config tweaks, or when user says "skip verification".
 
 **This skill vs github:** This skill verifies YOUR changes before committing.
 `github` reviews OTHER people's PRs on GitHub with inline comments.
 
-## Step 1 — Inventory the whole working tree
+## Step 1 — Get the diff
 
 ```bash
-git status --short
-git diff HEAD --stat
-git diff HEAD --name-only
-git ls-files --others --exclude-standard
+git diff --cached
 ```
 
-Review `git diff HEAD -- path/to/file` for tracked staged **and** unstaged changes; read untracked files separately. A cached-only diff misses working-tree edits and new files, so never infer readiness from `git diff --cached` alone. For a large change, split by subsystem and trace definitions/usages before judging behavior. If the user only asked for an assessment, do not stage files.
+If empty, try `git diff` then `git diff HEAD~1 HEAD`.
+
+If `git diff --cached` is empty but `git diff` shows changes, tell the user to
+`git add <files>` first. If still empty, run `git status` — nothing to verify.
+
+If the diff exceeds 15,000 characters, split by file:
+```bash
+git diff --name-only
+git diff HEAD -- specific_file.py
+```
 
 ## Step 2 — Static security scan
 
-Scan added lines across `git diff HEAD` and inspect untracked source files; classify matches as leads to investigate rather than proven vulnerabilities. Feed confirmed concerns into Step 5.
+Scan added lines only. Any match is a security concern fed into Step 5.
 
 ```bash
 # Hardcoded secrets
-git diff HEAD | grep "^+" | grep -iE "(api_key|secret|password|token|passwd)\s*=\s*['\"][^'\"]{6,}['\"]"
+git diff --cached | grep "^+" | grep -iE "(api_key|secret|password|token|passwd)\s*=\s*['\"][^'\"]{6,}['\"]"
 
 # Shell injection
-git diff HEAD | grep "^+" | grep -E "os\.system\(|subprocess.*shell=True"
+git diff --cached | grep "^+" | grep -E "os\.system\(|subprocess.*shell=True"
 
 # Dangerous eval/exec
-git diff HEAD | grep "^+" | grep -E "\beval\(|\bexec\("
+git diff --cached | grep "^+" | grep -E "\beval\(|\bexec\("
 
 # Unsafe deserialization
-git diff HEAD | grep "^+" | grep -E "pickle\.loads?\("
+git diff --cached | grep "^+" | grep -E "pickle\.loads?\("
 
 # SQL injection (string formatting in queries)
-git diff HEAD | grep "^+" | grep -E "execute\(f\"|\.format\(.*SELECT|\.format\(.*INSERT"
+git diff --cached | grep "^+" | grep -E "execute\(f\"|\.format\(.*SELECT|\.format\(.*INSERT"
 ```
 
 ## Step 3 — Baseline tests and linting
 
-Inspect the root and workspace manifests first: an aggregator such as Turbo may exit 0 while executing **zero** tests. Run actual workspace test scripts and report suite/test counts; run lint, typecheck, and build separately. To attribute failures to the change, inspect affected paths or compare with HEAD in a separate worktree when needed; do not stash a user's mixed staged/unstaged/untracked work just to establish a baseline. Distinguish code regressions from pre-existing errors and environment-dependent build failures.
+Detect the project language and run the appropriate tools. Capture the failure
+count BEFORE your changes as **baseline_failures** (stash changes, run, pop).
+Only NEW failures introduced by your changes block the commit.
 
 **Test frameworks** (auto-detect by project files):
 ```bash
 # Python (pytest)
 python -m pytest --tb=no -q 2>&1 | tail -5
 
-# Node: inspect package scripts first, then invoke each actual workspace test command.
-npm run test:unit --workspace=<workspace>
+# Node (npm test)
+npm test -- --passWithNoTests 2>&1 | tail -5
 
 # Rust
 cargo test 2>&1 | tail -5
@@ -123,9 +131,8 @@ checklist to the diff yourself, run the tests, and go to Step 8.
 
 Call `delegate_task` directly — it is NOT available inside execute_code or scripts.
 
-The reviewer gets the relevant diff, untracked source where applicable, static scan results, and enough surrounding definitions/usages to validate behavior. No implementation narrative. Fail-closed: unparseable response = fail.
-
-For integrations, trace the actual producer's output shape before trusting a mock: inspect generated query/API types and the relation's cardinality from the consuming side, then test the raw shape (including a single object versus an array). Hand-written fixtures can all pass while the real query returns a shape the helper cannot consume. Review state machines as sequences across repeated calls and multiple entities, not just isolated single-record cases: a per-variant recovery must not restore a product while another variant remains quarantined. Inject failures between sequential writes and verify state/markers after each failure. For a policy enforced by a new endpoint (publication, quarantine release, ownership), enumerate every other writer before approving: native Admin routes, batch routes, jobs, scripts, and direct workflows can bypass the endpoint. Verify the guard runs before native mutation, not in an after-update hook; guard protected metadata as well as status. When a decision reads DB state and then writes it, verify all competing writers share the same product-scoped lock/transaction across the entire mutation; a lock held only by one route does not prevent sync races. Exercise multiple entities and downstream-write failures so a partially updated product cannot be published. Where correctness depends on DB link mutations, prices, middleware order, or compensation, require an integration test against the real service; label unit-only approval as provisional, keep the ticket open, and do not claim atomicity for a compensating write.
+The reviewer gets ONLY the diff and static scan results. No shared context with
+the implementer. Fail-closed: unparseable response = fail.
 
 ```python
 delegate_task(
@@ -171,19 +178,13 @@ Return ONLY this JSON:
 )
 ```
 
-For write guards and "only this path may publish/release" invariants, follow
-`references/enforcing-write-guards.md`: leave one legal transition out of every state,
-enumerate all writers (batch, import, delete, jobs, scripts, direct workflows), watch
-parameterized-vs-static route overlap, and require an integration test before calling
-enforcement proven.
-
 ## Step 6 — Evaluate results
 
 Combine results from Steps 2, 3, and 5.
 
-**All passed:** Report readiness; proceed to Step 8 only if the user explicitly requested a commit.
+**All passed:** Proceed to Step 8 (commit).
 
-**Any failures:** Report what failed. Proceed to Step 7 only when the user requested implementation/fixes, not a read-only assessment.
+**Any failures:** Report what failed, then proceed to Step 7 (auto-fix).
 
 ```
 VERIFICATION FAILED
@@ -223,18 +224,21 @@ Fix each issue precisely. Describe what you changed and why.""",
 )
 ```
 
-While implementer and reviewer subagents run, send the user no progress narration —
-record each verdict where the work lives (ticket comment, branch note) and report to
-the user only the final outcome. Interim status messages burn tokens and get called out.
-
 After the fix agent completes, re-run Steps 1-6 (full verification cycle).
-- Passed: report readiness; commit only if explicitly requested.
-- Failed and attempts < 2: repeat Step 7.
-- Failed after 2 attempts: stop patching the same state machine; inspect whether the invariant needs product-level state or a transactional boundary, report the remaining risk, and ask before another implementation cycle. Preserve the user's working tree and ask before any destructive cleanup.
+- Passed: proceed to Step 8
+- Failed and attempts < 2: repeat Step 7
+- Failed after 2 attempts: escalate to user with the remaining issues and
+  suggest `git stash` or `git reset` to undo
 
-## Step 8 — Commit only on request
+## Step 8 — Commit
 
-If the user explicitly requested a commit, stage the reviewed files deliberately, verify the staged diff, then commit. Never use `git add -A` by default on a mixed working tree; it can sweep unrelated untracked work into the commit. A request to inspect changes or advise on a push authorizes neither edits nor a commit/push.
+If verification passed:
+
+```bash
+git add -A && git commit -m "[verified] <description>"
+```
+
+The `[verified]` prefix indicates an independent reviewer approved this change.
 
 ## Reference: Common Patterns to Flag
 
@@ -271,7 +275,7 @@ tests exist, tests pass, no regressions.
 
 ## Pitfalls
 
-- **Empty tracked diff** — check `git status` and untracked files before claiming there is nothing to verify
+- **Empty diff** — check `git status`, tell user nothing to verify
 - **Not a git repo** — skip and tell user
 - **Large diff (>15k chars)** — split by file, review each separately
 - **delegate_task returns non-JSON** — retry once with stricter prompt, then treat as FAIL
@@ -279,3 +283,40 @@ tests exist, tests pass, no regressions.
 - **No test framework found** — skip regression check, reviewer verdict still runs
 - **Lint tools not installed** — skip that check silently, don't fail
 - **Auto-fix introduces new issues** — counts as a new failure, cycle continues
+
+<!-- Merged in from the shared skills repo. Review placement. -->
+- When user asks what local changes mean, whether they are ready to push, or says "commit", "push", "ship", "done", "verify", or "review before merge"
+**Skip automated verification for:** documentation-only changes, pure config tweaks, or when user explicitly requests it; still inspect the requested diff.
+## Step 1 — Inventory the whole working tree
+git status --short
+git diff HEAD --stat
+git diff HEAD --name-only
+git ls-files --others --exclude-standard
+Review `git diff HEAD -- path/to/file` for tracked staged **and** unstaged changes; read untracked files separately. A cached-only diff misses working-tree edits and new files, so never infer readiness from `git diff --cached` alone. For a large change, split by subsystem and trace definitions/usages before judging behavior. If the user only asked for an assessment, do not stage files.
+Scan added lines across `git diff HEAD` and inspect untracked source files; classify matches as leads to investigate rather than proven vulnerabilities. Feed confirmed concerns into Step 5.
+git diff HEAD | grep "^+" | grep -iE "(api_key|secret|password|token|passwd)\s*=\s*['\"][^'\"]{6,}['\"]"
+git diff HEAD | grep "^+" | grep -E "os\.system\(|subprocess.*shell=True"
+git diff HEAD | grep "^+" | grep -E "\beval\(|\bexec\("
+git diff HEAD | grep "^+" | grep -E "pickle\.loads?\("
+git diff HEAD | grep "^+" | grep -E "execute\(f\"|\.format\(.*SELECT|\.format\(.*INSERT"
+Inspect the root and workspace manifests first: an aggregator such as Turbo may exit 0 while executing **zero** tests. Run actual workspace test scripts and report suite/test counts; run lint, typecheck, and build separately. To attribute failures to the change, inspect affected paths or compare with HEAD in a separate worktree when needed; do not stash a user's mixed staged/unstaged/untracked work just to establish a baseline. Distinguish code regressions from pre-existing errors and environment-dependent build failures.
+# Node: inspect package scripts first, then invoke each actual workspace test command.
+npm run test:unit --workspace=<workspace>
+The reviewer gets the relevant diff, untracked source where applicable, static scan results, and enough surrounding definitions/usages to validate behavior. No implementation narrative. Fail-closed: unparseable response = fail.
+For integrations, trace the actual producer's output shape before trusting a mock: inspect generated query/API types and the relation's cardinality from the consuming side, then test the raw shape (including a single object versus an array). Hand-written fixtures can all pass while the real query returns a shape the helper cannot consume. Review state machines as sequences across repeated calls and multiple entities, not just isolated single-record cases: a per-variant recovery must not restore a product while another variant remains quarantined. Inject failures between sequential writes and verify state/markers after each failure. For a policy enforced by a new endpoint (publication, quarantine release, ownership), enumerate every other writer before approving: native Admin routes, batch routes, jobs, scripts, and direct workflows can bypass the endpoint. Verify the guard runs before native mutation, not in an after-update hook; guard protected metadata as well as status. When a decision reads DB state and then writes it, verify all competing writers share the same product-scoped lock/transaction across the entire mutation; a lock held only by one route does not prevent sync races. Exercise multiple entities and downstream-write failures so a partially updated product cannot be published. Where correctness depends on DB link mutations, prices, middleware order, or compensation, require an integration test against the real service; label unit-only approval as provisional, keep the ticket open, and do not claim atomicity for a compensating write.
+For write guards and "only this path may publish/release" invariants, follow
+`references/enforcing-write-guards.md`: leave one legal transition out of every state,
+enumerate all writers (batch, import, delete, jobs, scripts, direct workflows), watch
+parameterized-vs-static route overlap, and require an integration test before calling
+enforcement proven.
+**All passed:** Report readiness; proceed to Step 8 only if the user explicitly requested a commit.
+**Any failures:** Report what failed. Proceed to Step 7 only when the user requested implementation/fixes, not a read-only assessment.
+While implementer and reviewer subagents run, send the user no progress narration —
+record each verdict where the work lives (ticket comment, branch note) and report to
+the user only the final outcome. Interim status messages burn tokens and get called out.
+- Passed: report readiness; commit only if explicitly requested.
+- Failed and attempts < 2: repeat Step 7.
+- Failed after 2 attempts: stop patching the same state machine; inspect whether the invariant needs product-level state or a transactional boundary, report the remaining risk, and ask before another implementation cycle. Preserve the user's working tree and ask before any destructive cleanup.
+## Step 8 — Commit only on request
+If the user explicitly requested a commit, stage the reviewed files deliberately, verify the staged diff, then commit. Never use `git add -A` by default on a mixed working tree; it can sweep unrelated untracked work into the commit. A request to inspect changes or advise on a push authorizes neither edits nor a commit/push.
+- **Empty tracked diff** — check `git status` and untracked files before claiming there is nothing to verify

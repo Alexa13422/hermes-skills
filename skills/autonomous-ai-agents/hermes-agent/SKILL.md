@@ -211,4 +211,6 @@ terminal(command="tmux new-session -d -s resumed 'hermes --resume 20260225_14305
 - **Secrets in `.env`, settings in `config.yaml`** — never tell a user to put a non-credential setting in `.env`.
 - **Profile-safe paths** — `get_hermes_home()` in code, `$HERMES_HOME` when resolving paths in a session.
 - **Never hand-edit `config.yaml` for the user** — use `hermes config set KEY VAL`; a stray indent can corrupt the file and break the live gateway.
+
+<!-- Merged in from the shared skills repo. Review placement. -->
 - **Separate Desktop chat health from messaging-gateway health** — when the Desktop shows a messaging-stopped warning, check `hermes gateway status` and the gateway logs before diagnosing the model or Desktop backend; Desktop inference may be healthy while the optional messaging gateway is stopped.

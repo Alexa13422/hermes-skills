@@ -46,7 +46,7 @@ hermes fallback [add|remove|list]  Fallback provider chain
 hermes config [show|edit|get|set|unset|path|env-path|check|migrate]
 hermes login / logout       OAuth sign-in / clear stored auth
 hermes doctor [--fix]       Check dependencies and config
-hermes status [--full]      Component summary (--full: every section)
+hermes status [--all]       Component status
 ```
 
 ### Tools & Skills
@@ -149,3 +149,6 @@ Plugin- and provider-supplied subcommands (e.g. `hermes photon setup`) only appe
 | Env variables | `hermes config env-path` · [Env vars reference](https://hermes-agent.nousresearch.com/docs/reference/environment-variables) |
 | Gateway logs | `~/.hermes/logs/gateway.log` (or `hermes logs`) |
 | Sessions | `hermes sessions browse` (reads state.db) |
+
+<!-- Merged in from the shared skills repo. Review placement. -->
+hermes status [--full]      Component summary (--full: every section)

@@ -50,6 +50,23 @@ description: Use when building PhotoKit iOS apps with shared results.
    thresholds", print the real curves and a worked ordering from the shipped code
    rather than reciting constants — see `scripts/rank-report-probe.md` for the
    throwaway-probe loop and the rule about deleting it afterwards.
+16. Build the platform metadata adapter for batch speed, and resolve timezone and
+   city from the photo's own coordinates offline — see
+   `references/batch-metadata-extraction.md` for the paging rules, the per-asset
+   resolve ban, the timezone trap that silently empties a scan, and the cost
+   assertions worth testing.
+17. Before promising a scan is fast enough — or answering "how long will this
+   take" — measure it over an **overlap sweep**, not a library-size sweep: cost
+   is driven by how much the two people coincide, so the pair the product is
+   built for is the slowest case. See
+   `references/matching-performance-measurement.md` for the fixture shape, the
+   per-photo versus per-period split, the CPU-profile loop, and the reporting
+   rules.
+18. When measurement shows the pairing cross product is the hot term, cut it
+   with a spatial index sized per allowance class — and prove the findings did
+   not change by diffing a canonical output fingerprint against the stashed
+   pre-change code. See `references/cross-product-optimisation.md`; a run of the
+   new code against itself proves nothing.
 
 ## Presentation logic belongs in the core
 
@@ -65,6 +82,41 @@ description: Use when building PhotoKit iOS apps with shared results.
 - Scope a per-result map to the days of that result. Reusing the window-wide point
   set for a single card's "how close" view leaks the whole window into a view the
   user understands as being about one moment.
+- Give plotted points an **opaque, chapter-scoped handle** (`d0`, `d1`, …) and keep
+  the photo-id → handle direction beside the point set, not inside it. A tapped
+  point must resolve to "which finding is this, if any", which the point cannot
+  answer alone; but the window-wide map is the one surface that reconstructs a
+  month of both people's movements and is handed to views and later to the peer,
+  so a point naming a photo lets that whole surface be joined back to individual
+  photos. Callers plot the points without ever holding the lookup.
+  - When adding a field to a shared surface breaks a test asserting "no
+    identifier appears here", the test is stating a **disclosure** rule and is
+    almost certainly right. Re-derive the feature through an opaque handle; do
+    not relax the assertion to the new shape.
+  - Keep the point set and its lookup empty together — a lookup without points
+    resolves taps onto a map that was never plotted.
+- Decide tap semantics in the core state machine, not the view: a point in no
+  finding **clears** the selection (a tap that leaves an unrelated window open
+  reads as describing the point just tapped); a point in several findings opens
+  its best-ranked one and cycles on repeat taps, and the window offers "tap
+  again" only when a sibling exists, so the hint never promises a no-op. Showing
+  only the best finding silently makes the window's content depend on data the
+  user cannot see.
+- Derive a map's day legend from the plotted points, never from the chapter's
+  start/end days: those include days carried in as matching context, and a legend
+  claiming a wider range than it shows invites the reader to wonder what is
+  missing.
+- Distinguish "no map because precise places were not agreed" from "you were
+  nowhere", and "nothing to compare because the peer's submission has not
+  arrived" from "no near misses". Collapsing either pair of states makes the
+  screen assert something untrue; and comparing one phone's signals against
+  themselves to fill the screen manufactures findings out of one person's
+  history.
+- Render the two photos of a finding side by side at equal size, caption first.
+  Seeing them together is the product; a larger one reads as the real photo with
+  the other as a footnote. A missing thumbnail must not hide the caption — the
+  finding is the claim, the photos are evidence for it, and the pair may not have
+  exchanged photos yet.
 - Generate captions in the core and pin the wording with tests:
   - Never claim a meeting. Same-day proximity reads as "close enough to have
     crossed paths — not proof that you did"; different-day proximity must state
@@ -126,6 +178,23 @@ description: Use when building PhotoKit iOS apps with shared results.
   `technicalDetail` field shown only behind an explicit "technical details"
   affordance, and assert in tests that the message does not contain it.
 
+## Answering a product question about performance
+
+- When the user proposes a **pre-scan warning or a results cap** to manage a slow
+  path, say plainly when it is the wrong instrument instead of implementing it.
+  Two mechanisms, both worth stating: a warning phrased around heavy overlap
+  turns the product's best outcome ("you two coincide constantly") into a
+  complaint, about a thing the user cannot change — a warning is only honest
+  where it offers a choice; and a cap on *results* cannot recover the cost,
+  because the expense is finding the candidates, which happens before anything
+  is ranked or trimmed. Existing caps (top-N per chapter, window length) demon-
+  strate this: they were already in place and bought nothing.
+- Redirect to the three things that do work: fix the algorithm, stream findings
+  so early results render while the rest computes, and offer the date range as an
+  ordinary way to use the product ("look at this summer") rather than as a
+  performance disclaimer. Reserve a notice for genuinely long runs, framed as an
+  estimate with an opt-out, never as a demand for a decision.
+
 ## Gates
 
 - Before claiming an audited core "works", grep the app sources for the core's
@@ -142,6 +211,11 @@ description: Use when building PhotoKit iOS apps with shared results.
 - Funnel every mutation through one place that catches the core's refusals and
   surfaces them. A swallowed refusal leaves the UI offering an action the core
   will reject.
+- Stage explicit paths, never `git add -A`, and check `git status` against
+  `git diff --ignore-all-space --stat` first. A repo touched from a Windows
+  checkout shows whole trees as modified on line endings alone; sweeping that in
+  buries the real change and attributes someone else's churn to you. Confirm the
+  current branch at the same time rather than assuming `main`.
 - Keep build products out of the repository. Verify with a tracked-file count
   under the build directory before the first push, not after: once committed they
   conflict on every push and `git rm --cached` plus `.gitignore` is a second,
@@ -154,15 +228,51 @@ description: Use when building PhotoKit iOS apps with shared results.
   after the push. Check how the project generator lists the sources before adding
   an import to an app file.
 - Check the remote run's actual conclusion and logs before saying a platform build passed. If a workflow push is rejected for missing GitHub `workflow` scope, add that scope through the approved authentication flow, verify `gh auth status`, push again, and inspect the run; a local YAML parse alone proves nothing.
+  - Read the **per-job** conclusions, not the run's. A green pure-test job sits
+    beside red device builds, and watching only the test job means the
+    installable-artifact path can stay broken for many commits unnoticed.
+  - Distinguish `cancelled` from `failure`: with `cancel-in-progress`
+    concurrency, a superseding push cancels sibling jobs, and treating a
+    cancellation as a defect sends the next session hunting a bug that never
+    existed.
+  - `gh run view --log` is unavailable until the run completes, and an Xcode job
+    emits six-figure character logs where thousands of lines of *successful*
+    compilation surround the real error. Grep the log for `error:`,
+    `BUILD FAILED`, and `build commands failed` and read only those lines; the
+    exit code (65) names nothing, and the nearest-looking compile line is
+    usually an unrelated dependency.
+  - A Swift-tools-version refusal at package resolution ("package is using
+    Swift tools X but the installed version is Y") is an **image** mismatch, not
+    a code defect: a dependency outran the runner image's Xcode. Fix it by
+    naming a runner image whose Xcode carries the required tools — confirm the
+    version from the runner-images readme for that label rather than guessing —
+    and record in the commit why the job is not on the older image, or someone
+    will "tidy" it back.
 - Keep the written product contract in step with the boundary the code enforces.
   A contract promising an exchange the transport cannot perform is read by
   reviewers and future agents as a missing feature, and it invites someone to
   "fix" it by widening the boundary.
+- When the user asks where the computation happens, or whether anything goes to a
+  server, a cloud, or someone else's machine, answer with evidence rather than
+  reassurance: grep the non-test sources for HTTP call sites and absolute URLs,
+  and read the dependency list for any service SDK. Then name the one thing that
+  *does* reach the network — the map tile provider fetching imagery for a region,
+  which receives a viewport and never photos or findings — because a blanket
+  "nothing leaves the device" is false and the user will find the exception. Say
+  explicitly that the development host only edits code and runs tests, and that
+  an unwired transport means data currently goes nowhere at all. Explain all of
+  it without naming files, types, or fields; this user reads identifiers in prose
+  as noise.
 - When the user asks what was left undone, answer in plain language: for each gap,
   what it means concretely, what the user would observe, and why it was left —
   not a restatement of the finding in the reviewer's vocabulary. End by naming the
   one decision you need from them.
-- Report work the way this user wants it: no step-by-step narration while working.
+- Report work the way this user wants it: **no narration at all between tool
+  calls** — not a one-line "now checking X", not a "found it, looking deeper".
+  This user has escalated to shouting about it more than once, so treat any
+  interim prose as a defect, not a style choice: work silently through the tool
+  calls and speak once at the end. Pointing out a mid-run discovery costs the
+  user more than it tells them; it survives fine in the final message.
   The final message states findings and outcome only — what was confirmed by
   reproduction, what was fixed, what survived as an equivalent mutant, and what
   remains unverified. Never relay a subagent's self-report as verification;
@@ -185,3 +295,6 @@ description: Use when building PhotoKit iOS apps with shared results.
   performance, city resolution, real two-device sharing); say so plainly instead
   of adding another core module.
 - Keep the app repository separate from a source repository of copied engineering skills. Verify provenance and redistribution terms before making a repository with third-party skills public.
+
+<!-- Merged in from the shared skills repo. Review placement. -->
+- Report work the way this user wants it: no step-by-step narration while working.
